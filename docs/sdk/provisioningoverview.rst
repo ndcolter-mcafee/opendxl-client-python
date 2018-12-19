@@ -10,7 +10,7 @@ the brokers to connect to.
 Provisioning Options
 ********************
 
-The following options are available for a provisioning a client:
+The following options are available for provisioning a client:
 
 * :ref:`Command Line Interface (CLI) <basiccliprovisioning>`
 
