@@ -1,14 +1,22 @@
 # -*- coding: utf-8 -*-
 ################################################################################
-# Copyright (c) 2017 McAfee Inc. - All Rights Reserved.
+# Copyright (c) 2018 McAfee LLC - All Rights Reserved.
 ################################################################################
 
+"""
+Classes which manage registration and routing of incoming messages from the
+DXL to callbacks.
+"""
+
+from __future__ import absolute_import
+import inspect
 import threading
-import types
 
 from dxlclient import _BaseObject
 from dxlclient.callbacks import MessageCallback, RequestCallback, ResponseCallback, EventCallback
 from dxlclient._dxl_utils import WildcardCallback, DxlUtils
+
+from ._compat import is_string
 
 
 def _has_wildcard(channel_name):
@@ -18,7 +26,7 @@ def _has_wildcard(channel_name):
     :param channel_name: The channel name
     :return: Whether the channel has a wildcard
     """
-    if not  isinstance(channel_name, str):
+    if not is_string(channel_name):
         raise ValueError("Channel name should be str class")
     return channel_name and channel_name[-1] == '#'
 
@@ -43,13 +51,32 @@ class _CallbackManager(_BaseObject):
         if callback is None:
             raise ValueError("Missing callback argument")
         # Check if the provided eventCallback is a class
-        if isinstance(callback, (type, types.ClassType)):
+        if inspect.isclass(callback):
             if not issubclass(callback, MessageCallback):
                 raise ValueError("Type mismatch on callback argument")
         # Not a class, but an instance
         else:
             if not issubclass(callback.__class__, MessageCallback):
                 raise ValueError("Type mismatch on callback argument")
+
+    def _get_callbacks_by_channel_copy(self):
+        """
+        Get a copy of the contents of self.callbacks_by_channel. This is used
+        when methods are about to make changes to the content of
+        self.callbacks_by_channel. The use of this method allows other methods
+        to access the content within the self.callbacks_by_channel object
+        without needing to hold a lock.
+
+        :return: Copy of the self.callbacks_by_channel dictionary. The memory
+            for the keys is copied. The memory for the arrays in the values for
+            each key is copied as well. The individual members of each array,
+            however, will be the same references as in the arrays in the
+            current self.callbacks_by_channel dictionary.
+        """
+        callbacks_by_channel = self.callbacks_by_channel.copy()
+        for channel in callbacks_by_channel:
+            callbacks_by_channel[channel] = list(callbacks_by_channel[channel])
+        return callbacks_by_channel
 
     def add_callback(self, channel="", callback=None):
         """
@@ -69,13 +96,18 @@ class _CallbackManager(_BaseObject):
         with self.lock:
             if _has_wildcard(channel):
                 self.wildcarding_enabled = True
-            callbacks = self.callbacks_by_channel.get(channel)
+            # Add the new callback into a copy of the contents of
+            # self.callbacks_by_channel. This avoids causing issues with any
+            # readers using the current value of the object.
+            callbacks_by_channel = self._get_callbacks_by_channel_copy()
+            callbacks = callbacks_by_channel.get(channel)
             if callbacks is None:
                 callbacks = []
             if not callback in callbacks:
                 callbacks.append(callback)
-                self.callbacks_by_channel[channel] = callbacks
+                callbacks_by_channel[channel] = callbacks
                 rc = True  # pylint: disable=invalid-name
+            self.callbacks_by_channel = callbacks_by_channel
         return rc
 
     def remove_callback(self, channel="", callback=None):
@@ -93,22 +125,27 @@ class _CallbackManager(_BaseObject):
 
         rc = False  # pylint: disable=invalid-name
         with self.lock:
-            callbacks = self.callbacks_by_channel.get(channel)
+            # Remove the callback from a copy of the contents of
+            # self.callbacks_by_channel. This avoids causing issues with any
+            # readers using the current value of the object.
+            callbacks_by_channel = self._get_callbacks_by_channel_copy()
+            callbacks = callbacks_by_channel.get(channel)
             if callbacks is not None:
-                callbacks.remove(callback)
-                if len(callbacks) == 0:
-                    del self.callbacks_by_channel[channel]
+                if callback in callbacks:
+                    callbacks.remove(callback)
+                if callbacks:
+                    callbacks_by_channel[channel] = callbacks
                 else:
-                    self.callbacks_by_channel[channel] = callbacks
+                    del callbacks_by_channel[channel]
                 rc = True  # pylint: disable=invalid-name
-
             #Determine if any wildcard exist
             if self.wildcarding_enabled:
                 self.wildcarding_enabled = False
-                for current_channel_name in self.callbacks_by_channel.keys():
+                for current_channel_name in callbacks_by_channel.keys():
                     if _has_wildcard(current_channel_name):
                         self.wildcarding_enabled = True
                         break
+            self.callbacks_by_channel = callbacks_by_channel
         return rc
 
     def fire_message(self, message):
@@ -119,25 +156,38 @@ class _CallbackManager(_BaseObject):
         :param message: The message to fire
         :return: None
         """
-        with self.lock:
-            # Fire for global listeners (channel="")
-            self._fire_message(self.callbacks_by_channel.get(""), message)
-            # Fire for channel listeners
-            self._fire_message(self.callbacks_by_channel.get(message.destination_topic), message)
-            #Fire for all wildcarded channels
-            # If wildcarding is enabled the message will be fired to each of the message's destination
-            # wildcards, if such wildcard exists.
-            if self.wildcarding_enabled:
+        # Store the current value of self.callbacks_by_channel in a local
+        # variable before accessing its contents. This should ensure that if
+        # self.callbacks_by_channel is reassigned while iterating over its
+        # contents that no concurrent modification errors are encountered.
+        callbacks_by_channel = self.callbacks_by_channel
 
-                def on_next_wildcard(wildcard):
-                    #if wildcarded channel does not exist no message is fired
-                    self._fire_message(self.callbacks_by_channel.get(wildcard), message)
+        # Fire for global listeners (channel="")
+        self._fire_message(callbacks_by_channel.get(""), message)
 
-                wildcard_callback = WildcardCallback()
-                wildcard_callback.on_next_wildcard = on_next_wildcard
+        # Fire for channel listeners
+        self._fire_message(callbacks_by_channel.get(message.destination_topic),
+                           message)
 
-                #Iterate over all channel wildcards sending messages via callback if
-                DxlUtils.iterate_wildcards(wildcard_callback, message.destination_topic)
+        # Fire for all wildcarded channels
+        # If wildcarding is enabled the message will be fired to each of the message's destination
+        # wildcards, if such wildcard exists.
+        if self.wildcarding_enabled:
+
+            def on_next_wildcard(wildcard):
+                """
+                Invoked for the next wildcard pattern found
+
+                :param wildcard: The wildcard pattern
+                """
+                #if wildcarded channel does not exist no message is fired
+                self._fire_message(callbacks_by_channel.get(wildcard), message)
+
+            wildcard_callback = WildcardCallback()
+            wildcard_callback.on_next_wildcard = on_next_wildcard
+
+            #Iterate over all channel wildcards sending messages via callback
+            DxlUtils.iterate_wildcards(wildcard_callback, message.destination_topic)
 
     def _fire_message(self, callbacks, message):
         """
@@ -147,11 +197,9 @@ class _CallbackManager(_BaseObject):
         :param message: The message to fire
         :return:
         """
-        if callbacks is None or len(callbacks) == 0:
-            return
-
-        for callback in callbacks:
-            self.handle_fire(callback, message)
+        if callbacks:
+            for callback in callbacks:
+                self.handle_fire(callback, message)
 
     def handle_fire(self, callback, message):
         """
@@ -177,7 +225,7 @@ class _RequestCallbackManager(_CallbackManager):
         """
         super(_RequestCallbackManager, self).validate_callback(callback)
         # Check if the provided callback is a class
-        if isinstance(callback, (type, types.ClassType)):
+        if inspect.isclass(callback):
             if not issubclass(callback, RequestCallback):
                 raise ValueError("Type mismatch on callback argument")
         # Not a class, but an instance
@@ -186,6 +234,7 @@ class _RequestCallbackManager(_CallbackManager):
                 raise ValueError("Type mismatch on callback argument")
 
     def handle_fire(self, request_callback, request):
+        # pylint: disable=arguments-differ
         """
         Runs `request_callback` for `request`.
 
@@ -193,7 +242,7 @@ class _RequestCallbackManager(_CallbackManager):
         :param request: {@link dxlclient.request.Request} object.
         """
         # Check if the provided eventCallback is a class
-        if isinstance(request_callback, (type, types.ClassType)):
+        if inspect.isclass(request_callback):
             callback = request_callback()
             callback.on_request(request)
         # Not a class, but an instance
@@ -214,7 +263,7 @@ class _ResponseCallbackManager(_CallbackManager):
         """
         super(_ResponseCallbackManager, self).validate_callback(callback)
         # Check if the provided callback is a class
-        if isinstance(callback, (type, types.ClassType)):
+        if inspect.isclass(callback):
             if not issubclass(callback, ResponseCallback):
                 raise ValueError("Type mismatch on callback argument")
         # Not a class, but an instance
@@ -223,6 +272,7 @@ class _ResponseCallbackManager(_CallbackManager):
                 raise ValueError("Type mismatch on callback argument")
 
     def handle_fire(self, response_callback, response):
+        # pylint: disable=arguments-differ
         """
         Runs `response_callback` for `response`.
 
@@ -230,7 +280,7 @@ class _ResponseCallbackManager(_CallbackManager):
         :param response: {@link dxlclient.response.Response} object.
         """
         # Check if the provided eventCallback is a class
-        if isinstance(response_callback, (type, types.ClassType)):
+        if inspect.isclass(response_callback):
             callback = response_callback()
             callback.on_response(response)
         # Not a class, but an instance
@@ -251,7 +301,7 @@ class _EventCallbackManager(_CallbackManager):
         """
         super(_EventCallbackManager, self).validate_callback(callback)
         # Check if the provided callback is a class
-        if isinstance(callback, (type, types.ClassType)):
+        if inspect.isclass(callback):
             if not issubclass(callback, EventCallback):
                 raise ValueError("Type mismatch on callback argument")
         # Not a class, but an instance
@@ -260,6 +310,7 @@ class _EventCallbackManager(_CallbackManager):
                 raise ValueError("Type mismatch on callback argument")
 
     def handle_fire(self, event_callback, event):
+        # pylint: disable=arguments-differ
         """
         Runs `event_callback` for `event`.
 
@@ -267,7 +318,7 @@ class _EventCallbackManager(_CallbackManager):
         :param event: {@link dxlclient.event.Event} object.
         """
         # Check if the provided eventCallback is a class
-        if isinstance(event_callback, (type, types.ClassType)):
+        if inspect.isclass(event_callback):
             callback = event_callback()
             callback.on_event(event)
         # Not a class, but an instance

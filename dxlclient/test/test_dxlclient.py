@@ -1,21 +1,26 @@
 # -*- coding: utf-8 -*-
 ################################################################################
-# Copyright (c) 2014 McAfee Inc. - All Rights Reserved.
+# Copyright (c) 2018 McAfee LLC - All Rights Reserved.
 ################################################################################
+
+"""
+Test cases for the DxlClient class
+"""
 
 # Run with python -m unittest dxlclient.test.test_dxlclient
 
-import unittest
+from __future__ import absolute_import
+import io
+from textwrap import dedent
 import time
 import threading
+import unittest
 
-from base_test import BaseClientTest
-import io
+# pylint: disable=wrong-import-position
+import paho.mqtt.client as mqtt
 from nose.plugins.attrib import attr
 from parameterized import parameterized
 from mock import Mock, patch
-from textwrap import dedent
-import __builtin__
 
 import dxlclient._global_settings
 from dxlclient import Request
@@ -29,8 +34,14 @@ from dxlclient import UuidGenerator
 from dxlclient import EventCallback
 from dxlclient import RequestCallback
 from dxlclient import ResponseCallback
-from dxlclient import DxlException
+from dxlclient import DxlException, WaitTimeoutException
+
+# pylint: disable=wildcard-import, unused-wildcard-import
 from dxlclient._global_settings import *
+
+from .base_test import BaseClientTest, builtins
+
+# pylint: disable=missing-docstring
 
 CONFIG_DATA_NO_CERTS_SECTION = """
 [no_certs]
@@ -108,15 +119,11 @@ class DxlClientConfigTest(unittest.TestCase):
         slow_broker = Mock()
 
         def connect_to_broker_slow():
-            import time
-
             semaphore.acquire()
             time.sleep(0.1)
-            return
 
         def connect_to_broker_fast():
             semaphore.release()
-            return
 
         slow_broker._connect_to_broker = connect_to_broker_slow
         fast_broker._connect_to_broker = connect_to_broker_fast
@@ -144,17 +151,18 @@ class DxlClientConfigTest(unittest.TestCase):
                                  private_key=get_dxl_private_key(),
                                  brokers=[])
         # Create mocked brokers
-        b1 = Mock()
-        b2 = Mock()
-        b1._connect_to_broker = b2._connect_to_broker = Mock(return_value=True)
+        broker1 = Broker('b1host')
+        broker2 = Broker('b2host')
+        broker1._connect_to_broker = broker2._connect_to_broker = Mock(
+            return_value=True)
         # Add them to config
-        config.brokers.append(b1)
-        config.brokers.append(b2)
+        config.brokers.append(broker1)
+        config.brokers.append(broker2)
         # Get all brokers
-        l = config._get_sorted_broker_list()
+        broker_list = config._get_sorted_broker_list()
         # Check all brokers are in the list
-        self.assertTrue(b1 in l)
-        self.assertTrue(b2 in l)
+        self.assertTrue(broker1 in broker_list)
+        self.assertTrue(broker2 in broker_list)
 
     def test_set_config_from_file_generates_dxl_config(self):
         read_data = """
@@ -167,8 +175,9 @@ class DxlClientConfigTest(unittest.TestCase):
         22cdcace-6e8f-11e5-29c0-005056aa56de=22cdcace-6e8f-11e5-29c0-005056aa56de;8883;dxl-broker-1;10.218.73.206
         """
 
-        with patch.object(__builtin__, 'open',
-                          return_value=io.BytesIO(dedent(read_data))) as mock_open, \
+        with patch.object(builtins, 'open',
+                          return_value=io.BytesIO(
+                              dedent(read_data).encode())) as mock_open, \
                 patch.object(os.path, 'isfile', return_value=True):
             client_config = DxlClientConfig.create_dxl_config_from_file("mock_file")
             self.assertEqual(client_config.cert_file, "certfile.pem")
@@ -192,8 +201,9 @@ class DxlClientConfigTest(unittest.TestCase):
         (CONFIG_DATA_NO_PK_OPTION,),
     ])
     def test_missing_certs_raises_exception(self, read_data):
-        with patch.object(__builtin__, 'open',
-                          return_value=io.BytesIO(dedent(read_data))), \
+        with patch.object(builtins, 'open',
+                          return_value=io.BytesIO(
+                              dedent(read_data).encode())), \
              patch.object(os.path, 'isfile', return_value=True):
             with self.assertRaises(ValueError):
                 DxlClientConfig.create_dxl_config_from_file("mock_file.cfg")
@@ -203,8 +213,9 @@ class DxlClientConfigTest(unittest.TestCase):
         (CONFIG_DATA_NO_BROKERS_OPTION,),
     ])
     def test_missing_brokers_doesnt_raise_exceptions(self, read_data):
-        with patch.object(__builtin__, 'open',
-                          return_value=io.BytesIO(dedent(read_data))), \
+        with patch.object(builtins, 'open',
+                          return_value=io.BytesIO(
+                              dedent(read_data).encode())), \
              patch.object(os.path, 'isfile', return_value=True):
             client_config = DxlClientConfig.create_dxl_config_from_file(
                 "mock_file.cfg")
@@ -232,7 +243,7 @@ class DxlClientConfigTest(unittest.TestCase):
             "myid1 = myid1;8001;myhost1;10.10.100.1",
             "myid2 = myid2;8002;myhost2;10.10.100.2{}".format(os.linesep)])
         byte_stream = self.CapturedBytesIO()
-        with patch.object(__builtin__, 'open',
+        with patch.object(builtins, 'open',
                           return_value=byte_stream) as mock_open:
             config = DxlClientConfig(
                 "mycabundle.pem",
@@ -243,7 +254,7 @@ class DxlClientConfigTest(unittest.TestCase):
                  Broker("myhost2", "myid2", "10.10.100.2",
                         8002)])
             config.write("myfile.txt")
-        self.assertEqual(expected_data, byte_stream.bytes_captured)
+        self.assertEqual(expected_data.encode(), byte_stream.bytes_captured)
         mock_open.assert_called_with("myfile.txt", "wb")
 
     def test_write_modified_config(self):
@@ -272,8 +283,8 @@ class DxlClientConfigTest(unittest.TestCase):
             "myid8 = myid8;8008;myhost8;10.10.100.8",
             "myid9 = myid9;8009;myhost9;10.10.100.9{}".format(os.linesep)])
 
-        with patch.object(__builtin__, 'open',
-                          return_value=io.BytesIO(initial_data)), \
+        with patch.object(builtins, 'open',
+                          return_value=io.BytesIO(initial_data.encode())), \
                 patch.object(os.path, 'isfile', return_value=True):
             config = DxlClientConfig.create_dxl_config_from_file(
                 "mock_file.cfg")
@@ -285,10 +296,11 @@ class DxlClientConfigTest(unittest.TestCase):
                                      "10.10.100.9",
                                      8009))
         byte_stream = self.CapturedBytesIO()
-        with patch.object(__builtin__, 'open',
+        with patch.object(builtins, 'open',
                           return_value=byte_stream) as mock_open:
             config.write("newfile.txt")
-        self.assertEqual(expected_data_after_mods, byte_stream.bytes_captured)
+        self.assertEqual(expected_data_after_mods.encode(),
+                         byte_stream.bytes_captured)
         mock_open.assert_called_with("newfile.txt", "wb")
 
 
@@ -308,35 +320,23 @@ class DxlClientTest(unittest.TestCase):
         self.test_channel = '/test/channel'
 
     def tearDown(self):
+        self.client._connected = False
+        self.client.destroy()
         patch.stopall()
 
     def test_client_raises_exception_on_connect_when_already_connecting(self):
         self.client._client.connect.side_effect = Exception("An exception!")
-
-        class MyThread(threading.Thread):
-            def __init__(self, client):
-                super(MyThread, self).__init__()
-                self._client = client
-
-            def run(self):
-                self._client.connect()
-
-        t = MyThread(self.client)
-        t.setDaemon(True)
-        t.start()
-        time.sleep(2)
-
+        self.client._thread = threading.Thread(target=None)
         self.assertEqual(self.client.connected, False)
         with self.assertRaises(DxlException):
             self.client.connect()
-            # self.client.disconnect()
+        self.client._thread = None
 
     def test_client_raises_exception_on_connect_when_already_connected(self):
         self.client._client.connect.side_effect = Exception("An exception!")
-        self.client._connected = Mock(return_value=True)
+        self.client._connected = True
         with self.assertRaises(DxlException):
             self.client.connect()
-            # self.client.disconnect()
 
     # The following test is too slow
     def test_client_disconnect_doesnt_raises_exception_on_disconnect_when_disconnected(self):
@@ -366,7 +366,6 @@ class DxlClientTest(unittest.TestCase):
         with self.assertRaises(DxlException):
             self.client.connect()
         self.assertEqual(self.client._client.connect.call_count, connect_count)
-        # self.client.disconnect()
 
     def test_client_subscribe_adds_subscription_when_not_connected(self):
         self.client._client.subscribe = Mock(return_value=None)
@@ -388,8 +387,10 @@ class DxlClientTest(unittest.TestCase):
 
     def test_client_subscribe_doesnt_add_twice_same_channel(self):
         # Mock client.subscribe and is_connected
-        self.client._client.subscribe = Mock(return_value=None)
+        self.client._client.subscribe = Mock(
+            return_value=(mqtt.MQTT_ERR_SUCCESS, 2))
         self.client._connected = Mock(return_value=True)
+        self.client._wait_for_packet_ack = Mock(return_value=None)
 
         # We always have the default (myself) channel
         self.assertEqual(len(self.client.subscriptions), 1)
@@ -408,6 +409,11 @@ class DxlClientTest(unittest.TestCase):
         self.client._handle_message(self.test_channel, evt)
         # Check that callback was called
         self.assertEqual(event_callback.on_event.call_count, 1)
+        self.client.remove_event_callback(self.test_channel, event_callback)
+        self.client._handle_message(self.test_channel, evt)
+        # Check that callback was not called again - because the event
+        # callback was unregistered
+        self.assertEqual(event_callback.on_event.call_count, 1)
 
     def test_client_handle_message_with_request_calls_request_callback(self):
         req_callback = RequestCallback()
@@ -417,6 +423,11 @@ class DxlClientTest(unittest.TestCase):
         req = Request(destination_topic=self.test_channel)._to_bytes()
         self.client._handle_message(self.test_channel, req)
         # Check that callback was called
+        self.assertEqual(req_callback.on_request.call_count, 1)
+        self.client.remove_request_callback(self.test_channel, req_callback)
+        self.client._handle_message(self.test_channel, req)
+        # Check that callback was not called again - because the request
+        # callback was unregistered
         self.assertEqual(req_callback.on_request.call_count, 1)
 
     def test_client_handle_message_with_response_calls_response_callback(self):
@@ -428,6 +439,21 @@ class DxlClientTest(unittest.TestCase):
         self.client._handle_message(self.test_channel, msg)
         # Check that callback was called
         self.assertEqual(callback.on_response.call_count, 1)
+        self.client.remove_response_callback(self.test_channel, callback)
+        self.client._handle_message(self.test_channel, msg)
+        # Check that callback was not called again - because the response
+        # callback was unregistered
+        self.assertEqual(callback.on_response.call_count, 1)
+
+    def test_client_remove_call_for_unregistered_callback_does_not_error(self):
+        callback = EventCallback()
+        callback.on_event = Mock()
+        callback2 = EventCallback()
+        callback2.on_event = Mock()
+        self.client.add_event_callback(self.test_channel, callback)
+        self.client.add_event_callback(self.test_channel, callback2)
+        self.client.remove_event_callback(self.test_channel, callback)
+        self.client.remove_event_callback(self.test_channel, callback)
 
     def test_client_send_event_publishes_message_to_dxl_fabric(self):
         self.client._client.publish = Mock(return_value=None)
@@ -463,25 +489,55 @@ class DxlClientTest(unittest.TestCase):
         # Check that message response was properly delivered to handler
         self.assertEqual(self.client._fire_response.call_count, 1)
 
-    """
-    Service unit tests
-    """
+    def test_client_subscribe_no_ack_raises_timeout(self):
+        self.client._client.subscribe = Mock(
+            return_value=(mqtt.MQTT_ERR_SUCCESS, 2))
+        self.client._connected = Mock(return_value=True)
+        with patch.object(DxlClient, '_MAX_PACKET_ACK_WAIT', 0.01):
+            with self.assertRaises(WaitTimeoutException):
+                self.client.subscribe(self.test_channel)
+
+    def test_client_unsubscribe_no_ack_raises_timeout(self):
+        self.client._client.subscribe = Mock(
+            return_value=(mqtt.MQTT_ERR_SUCCESS, 2))
+        self.client._client.unsubscribe = Mock(
+            return_value=(mqtt.MQTT_ERR_SUCCESS, 3))
+        self.client._connected = Mock(return_value=True)
+        original_wait_packet_acked_func = self.client._wait_for_packet_ack
+        self.client._wait_for_packet_ack = Mock(return_value=None)
+        self.client.subscribe(self.test_channel)
+        self.client._wait_for_packet_ack = original_wait_packet_acked_func
+        with patch.object(DxlClient, '_MAX_PACKET_ACK_WAIT', 0.01):
+            with self.assertRaises(WaitTimeoutException):
+                self.client.unsubscribe(self.test_channel)
+
+    # Service unit tests
 
     def test_client_register_service_subscribes_client_to_channel(self):
-        channel1 = '/mcafee/service/unittest/one'
-        channel2 = '/mcafee/service/unittest/two'
+        channel = '/mcafee/service/unittest'
+
         # Create dummy service
         service_info = dxlclient.service.ServiceRegistrationInfo(
             service_type='/mcafee/service/unittest', client=self.client)
-        service_info.add_topic(channel1, RequestCallback())
-        service_info.add_topic(channel2, RequestCallback())
+
+        # Add topics to the service
+        service_info.add_topic(channel + "1", RequestCallback())
+        service_info.add_topic(channel + "2", RequestCallback())
+        service_info.add_topics({channel + str(i): RequestCallback()
+                                 for i in range(3, 6)})
+
+        subscriptions_before_registration = self.client.subscriptions
+        expected_subscriptions_after_registration = \
+            sorted(subscriptions_before_registration +
+                   tuple(channel + str(i) for i in range(1, 6)))
 
         # Register service in client
         self.client.register_service_async(service_info)
         # Check subscribed channels
-        subscriptions = self.client.subscriptions
-        assert channel1 in subscriptions, "Client wasn't subscribed to service channel"
-        assert channel2 in subscriptions, "Client wasn't subscribed to service channel"
+        subscriptions_after_registration = self.client.subscriptions
+
+        self.assertEqual(expected_subscriptions_after_registration,
+                         sorted(subscriptions_after_registration))
 
     def test_client_wont_register_the_same_service_twice(self):
         service_info = dxlclient.service.ServiceRegistrationInfo(
@@ -519,13 +575,13 @@ class DxlClientTest(unittest.TestCase):
         self.client.register_service_async(service_info)
         # Check subscribed channels
         subscriptions = self.client.subscriptions
-        assert channel1 in subscriptions, "Client wasn't subscribed to service channel"
-        assert channel2 in subscriptions, "Client wasn't subscribed to service channel"
+        self.assertIn(channel1, subscriptions, "Client wasn't subscribed to service channel")
+        self.assertIn(channel2, subscriptions, "Client wasn't subscribed to service channel")
 
         self.client.unregister_service_async(service_info)
         subscriptions = self.client.subscriptions
-        assert channel1 not in subscriptions, "Client wasn't unsubscribed to service channel"
-        assert channel2 not in subscriptions, "Client wasn't unsubscribed to service channel"
+        self.assertNotIn(channel1, subscriptions, "Client wasn't unsubscribed to service channel")
+        self.assertNotIn(channel2, subscriptions, "Client wasn't unsubscribed to service channel")
 
     def test_client_register_service_unsuscribes_from_channel_by_guid(self):
         channel1 = '/mcafee/service/unittest/one'
@@ -549,13 +605,13 @@ class DxlClientTest(unittest.TestCase):
 
         # Check subscribed channels
         subscriptions = self.client.subscriptions
-        assert channel1 in subscriptions, "Client wasn't subscribed to service channel"
-        assert channel2 in subscriptions, "Client wasn't subscribed to service channel"
+        self.assertIn(channel1, subscriptions, "Client wasn't subscribed to service channel")
+        self.assertIn(channel2, subscriptions, "Client wasn't subscribed to service channel")
 
         self.client.unregister_service_async(service_info2)
         subscriptions = self.client.subscriptions
-        assert channel1 not in subscriptions, "Client wasn't unsubscribed to service channel"
-        assert channel2 not in subscriptions, "Client wasn't unsubscribed to service channel"
+        self.assertNotIn(channel1, subscriptions, "Client wasn't unsubscribed to service channel")
+        self.assertNotIn(channel2, subscriptions, "Client wasn't unsubscribed to service channel")
 
 
 @attr('system')
@@ -564,16 +620,16 @@ class DxlClientSystemClientTest(BaseClientTest):
     def test_client_connects_to_broker_and_sets_current_broker(self):
 
         with self.create_client() as client:
+            broker_ids = [broker.unique_id for broker in client.config.brokers]
             client.connect()
-            broker_id = "unique_broker_id_1"
-
             self.assertTrue(client.connected)
-            self.assertEqual(client.current_broker.unique_id, broker_id)
+            self.assertIn(client.current_broker.unique_id, broker_ids)
 
     def test_client_raises_exception_when_cannot_sync_connect_to_broker(self):
 
-        with self.create_client() as client:
-            broker = Broker("localhost", UuidGenerator.generate_id_as_string(), "127.0.0.1")
+        with self.create_client(max_retries=0) as client:
+            broker = Broker("localhost", UuidGenerator.generate_id_as_string(),
+                            "127.0.0.255", 58883)
             client._config.brokers = [broker]
 
             with self.assertRaises(DxlException):
@@ -588,7 +644,6 @@ class DxlClientSystemClientTest(BaseClientTest):
         with self.create_client() as client:
             test_topic = '/test/whatever/' + client.config._client_id
             client.connect()
-            time.sleep(2)
             self.assertTrue(client.connected)
 
             # Set request callback (use mock to easily check when it was called)
@@ -606,7 +661,6 @@ class DxlClientSystemClientTest(BaseClientTest):
 
             # Subscribe to topic
             client.subscribe(test_topic)
-            time.sleep(1)
 
             # Send event thru dxl fabric again to that topic
             msg = Event(destination_topic=test_topic)
@@ -624,7 +678,6 @@ class DxlClientSystemClientTest(BaseClientTest):
         with self.create_client() as client:
             test_topic = '/test/doesntexists/' + client.config._client_id
             client.connect()
-            time.sleep(2)
             self.assertTrue(client.connected)
 
             # Send request thru dxl fabric to a service which doesn't exists

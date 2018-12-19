@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
 ################################################################################
-# Copyright (c) 2017 McAfee Inc. - All Rights Reserved.
+# Copyright (c) 2018 McAfee LLC - All Rights Reserved.
 ################################################################################
-__version__ = "4.0.0.416"
+
+""" Product properties, used for packaging. """
+
+__version__ = "5.0.0.568"
 
 __product_id__ = "DXL_____1000"
 

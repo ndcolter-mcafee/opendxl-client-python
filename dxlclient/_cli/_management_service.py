@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 ###############################################################################
-# Copyright (c) 2017 McAfee Inc. - All Rights Reserved.
+# Copyright (c) 2018 McAfee LLC - All Rights Reserved.
 ###############################################################################
 
 """Helpers for making requests to a Management Service for CLI subcommands"""
 
+from __future__ import absolute_import
 import json
 import logging
 import warnings
@@ -14,7 +15,7 @@ from requests.auth import HTTPBasicAuth
 logger = logging.getLogger(__name__)
 
 
-class ManagementService(object):  # pylint: disable=too-few-public-methods
+class ManagementService(object):
     """
     Handles REST invocation of Management Service
     """

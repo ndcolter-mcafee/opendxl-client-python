@@ -15,9 +15,9 @@ Certificate Authority (CA) that will sign the client's certificate.
 `NOTE: ePO-managed environments must have 4.0 (or newer) versions of
 DXL ePO extensions installed.`
 
-Here is an example usage of ``provisionconfig`` operatoin::
+Here is an example usage of ``provisionconfig`` operation::
 
-    python -m dxlclient provisionconfig config myserver client1
+    dxlclient provisionconfig config myserver client1
 
 The parameters are as follows:
 
@@ -50,7 +50,7 @@ On success, output similar to the following should be displayed::
 As an alternative to prompting, the username and password values can be
 specified via command line options::
 
-    python -m dxlclient provisionconfig config myserver client1 -u myuser -p mypass
+    dxlclient provisionconfig config myserver client1 -u myuser -p mypass
 
 See the :doc:`advancedcliprovisioning` section for advanced
 ``provisionconfig`` operation options.

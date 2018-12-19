@@ -3,6 +3,7 @@
 # DXL Python SDK documentation build configuration file, created by
 # sphinx-quickstart on Tue Jan 13 11:34:32 2015.
 
+from __future__ import absolute_import
 import sys
 import os
 
@@ -31,8 +32,8 @@ source_suffix = '.rst'
 master_doc = 'index'
 
 # General information about the project.
-project = u'DXL Python SDK'
-copyright = u'2017, McAfee Inc.'
+project = u'OpenDXL Python SDK'
+copyright = u'2018, McAfee LLC'
 
 # The version info for the project you're documenting, acts as replacement for
 # |version| and |release|, also used in various other places throughout the
@@ -64,3 +65,4 @@ autoclass_content = 'both'
 
 modindex_common_prefix = ['dxlclient.']
 
+html_use_smartypants = False

@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 ###############################################################################
-# Copyright (c) 2017 McAfee Inc. - All Rights Reserved.
+# Copyright (c) 2018 McAfee LLC - All Rights Reserved.
 ###############################################################################
 
 """Helpers for the client cli"""
 
+from __future__ import absolute_import
 import argparse
 import logging
 import sys
@@ -46,6 +47,11 @@ def _add_subcommand_argparsers(parser):
     :param argparse.ArgumentParser parser: the base argparser
     """
     subparsers = parser.add_subparsers(title="subcommands")
+
+    # Adding these lines to force argparser to validate the presence of a
+    # subcommand in Python 3. See https://bugs.python.org/issue9253#msg186387.
+    subparsers.required = True
+    subparsers.dest = 'subcommand'
 
     for subcommand_class in _SUBCOMMAND_CLASSES:
         subcommand = subcommand_class()
@@ -91,15 +97,19 @@ def cli_run():
     """
     parser = _create_argparser()
     _add_subcommand_argparsers(parser)
-    args = parser.parse_args(sys.argv[1:])
 
-    verbosity_level = 0 if args.silent else args.verbose+1
+    input_args = sys.argv[1:]
+    if not input_args:
+        input_args = ["-h"]
+    parsed_args = parser.parse_args(input_args)
+
+    verbosity_level = 0 if parsed_args.silent else parsed_args.verbose+1
     logging.basicConfig(level=_get_log_level(verbosity_level),
                         format=_get_log_formatter(verbosity_level))
     try:
-        args.func(args)
+        parsed_args.func(parsed_args)
     except Exception as ex:  # pylint: disable=broad-except
-        logger.error("Command failed. Message: %s", ex.message)
+        logger.error("Command failed. Message: %s", ex)
         if verbosity_level >= 2:
             raise
         else:
