@@ -16,8 +16,7 @@ import traceback
 import random
 import time
 
-import paho.mqtt.client as mqtt
-
+import pahoproxy.client as mqtt
 from dxlclient import _BaseObject
 from dxlclient.client_config import DxlClientConfig
 import dxlclient._callback_manager as callback_manager
@@ -25,7 +24,7 @@ from dxlclient._request_manager import RequestManager
 from dxlclient.exceptions import DxlException
 from dxlclient.message import Message, Event, Request, Response, ErrorResponse
 from dxlclient._thread_pool import ThreadPool
-from dxlclient.exceptions import WaitTimeoutException
+from dxlclient.exceptions import WaitTimeoutException, NoBrokerSpecifiedError
 from dxlclient.service import _ServiceManager
 from dxlclient._uuid_generator import UuidGenerator
 from ._dxl_utils import DxlUtils
@@ -386,28 +385,12 @@ class DxlClient(_BaseObject):
         self._subscriptions = set()
         # The lock for the current list of subscriptions
         self._subscriptions_lock = threading.RLock()
-
+        # HTTP Proxy for connecting through web sockets
+        self._proxy = self._config._get_http_proxy()
         # The underlying MQTT client instance
-        self._client = mqtt.Client(client_id=self._config._client_id,
-                                   clean_session=True,
-                                   userdata=self,
-                                   protocol=mqtt.MQTTv31)
-
-        # The MQTT client connect callback
-        self._client.on_connect = _on_connect
-        # The MQTT client disconnect callback
-        self._client.on_disconnect = _on_disconnect
-        # The MQTT client message callback
-        self._client.on_message = _on_message
-        # The MQTT client topic subscription callback
-        self._client.on_subscribe = _on_subscribe
-        # The MQTT client topic unsubscription callback
-        self._client.on_unsubscribe = _on_unsubscribe
-
-        # The MQTT client log callback
-        if logger.isEnabledFor(logging.DEBUG):
-            self._client.on_log = _on_log
-
+        self._client = self._get_mqtt_client()
+        # Set the callback methods for MQTT client
+        self._set_mqtt_client_callbacks()
         # pylint: disable=no-member
         # The MQTT client TLS configuration
         self._client.tls_set(config.broker_ca_bundle,
@@ -653,18 +636,27 @@ class DxlClient(_BaseObject):
         self._reset_current_broker()
         keep_alive_interval = self.config.keep_alive_interval
         latest_ex = None
+        # Get proxy
+        proxy = self._proxy
+        proxy_addr = proxy.get("proxy_addr", None)
+        proxy_port = proxy.get("proxy_port", None)
+        proxy_available = bool(proxy_addr is not None and proxy_port is not None)
+
+        if not proxy_available:
+            logger.debug("Not using proxy for connection.")
 
         for broker in brokers:
             if self._thread_terminate:
                 break
             if broker._response_time is not None:
                 try:
+                    if proxy_available:
+                        logger.info("Using proxy for connection: %s:%s", proxy_addr, proxy_port)
+                    logger.info("Trying to connect to broker %s...", broker.to_string())
                     if broker._response_from_ip_address:
-                        logger.info("Trying to connect to broker %s...", broker.to_string())
-                        self._client.connect(broker.ip_address, broker.port, keep_alive_interval)
+                        self._client.connect(broker.ip_address, broker.port, keep_alive_interval, **proxy)
                     else:
-                        logger.info("Trying to connect to broker %s...", broker.to_string())
-                        self._client.connect(broker.host_name, broker.port, keep_alive_interval)
+                        self._client.connect(broker.host_name, broker.port, keep_alive_interval, **proxy)
                     self._current_broker = broker
                     break
                 except Exception as ex:  # pylint: disable=broad-except
@@ -679,9 +671,11 @@ class DxlClient(_BaseObject):
                 if self._thread_terminate:
                     break
                 try:
+                    if proxy_available:
+                        logger.info("Using proxy for connection: %s:%s", proxy_addr, proxy_port)
                     logger.info(
                         "Trying to connect to broker (host name) %s...", broker.to_string())
-                    self._client.connect(broker.host_name, broker.port, keep_alive_interval)
+                    self._client.connect(broker.host_name, broker.port, keep_alive_interval, **proxy)
                     self._current_broker = broker
                     break
                 except Exception as ex:  # pylint: disable=broad-except
@@ -694,10 +688,12 @@ class DxlClient(_BaseObject):
                     break
                 if self._current_broker is None and broker.ip_address:
                     try:
+                        if proxy_available:
+                            logger.info("Using proxy for connection: %s:%s", proxy_addr, proxy_port)
                         logger.info(
                             "Trying to connect to broker (IP address) %s (%s:%d)...",
                             broker.unique_id, broker.ip_address, broker.port)
-                        self._client.connect(broker.ip_address, broker.port, keep_alive_interval)
+                        self._client.connect(broker.ip_address, broker.port, keep_alive_interval, **proxy)
                         self._current_broker = broker
                         break
                     except Exception as ex:  # pylint: disable=broad-except
@@ -721,12 +717,12 @@ class DxlClient(_BaseObject):
             return DXL_ERR_INVALID
 
         logger.info("Waiting for broker list...")
+        if not self._config.brokers:
+            raise NoBrokerSpecifiedError('No broker specified. Please specify at least one broker.')
         self._config_lock.acquire()
         try:
             while not self._thread_terminate and not self._config.brokers:
                 self._config_lock_condition.wait(self._wait_for_policy_delay)
-                if self._config.brokers:
-                    logger.debug("No broker defined. Waiting for broker list...")
         finally:
             self._config_lock.release()
 
@@ -1254,3 +1250,32 @@ class DxlClient(_BaseObject):
 
             self._service_manager.remove_service(service_req_info.service_id)
             service_req_info._wait_for_unregistration(timeout=timeout)
+
+    def _get_mqtt_client(self):
+        """
+        Returns the mqtt client instance
+        :return: MQTT client instance
+        """
+        return mqtt.Client(client_id=self._config._client_id,
+                           clean_session=True,
+                           userdata=self,
+                           protocol=mqtt.MQTTv311,
+                           transport="websockets" if self.config.use_websockets else "tcp")
+
+    def _set_mqtt_client_callbacks(self):
+        """
+        Sets the callbacks for MQTT client
+        """
+        # The MQTT client connect callback
+        self._client.on_connect = _on_connect
+        # The MQTT client disconnect callback
+        self._client.on_disconnect = _on_disconnect
+        # The MQTT client message callback
+        self._client.on_message = _on_message
+        # The MQTT client topic subscription callback
+        self._client.on_subscribe = _on_subscribe
+        # The MQTT client topic unsubscription callback
+        self._client.on_unsubscribe = _on_unsubscribe
+        # The MQTT client log callback
+        if logger.isEnabledFor(logging.DEBUG):
+            self._client.on_log = _on_log

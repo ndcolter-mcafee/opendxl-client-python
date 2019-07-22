@@ -12,6 +12,7 @@ import re
 import socket
 import datetime
 import logging
+import socks
 
 from dxlclient import _BaseObject
 from dxlclient.exceptions import MalformedBrokerUriException
@@ -41,6 +42,8 @@ class Broker(_BaseObject):
     """The SSL protocol identifier"""
     _SSL_PORT = 8883
     """The standard TLS port"""
+    _WSS_PROTOCOL = "wss"
+    """The WSS protocol identifier"""
 
     def __init__(self, host_name, unique_id=None, ip_address=None, port=_SSL_PORT):
         """
@@ -175,7 +178,7 @@ class Broker(_BaseObject):
         broker.port = port
         broker.unique_id = UuidGenerator.generate_id_as_string()
 
-        if protocol and protocol.lower() != Broker._SSL_PROTOCOL.lower():
+        if protocol and protocol.lower() not in [Broker._SSL_PROTOCOL.lower(), Broker._WSS_PROTOCOL.lower()]:
             raise MalformedBrokerUriException("Unknown protocol: " + protocol)
 
         return broker
@@ -196,17 +199,17 @@ class Broker(_BaseObject):
 
         if len(elements) < 2:
             raise MalformedBrokerUriException("Missing elements")
+
+        if Broker._is_port_number(elements[0]):
+            self.unique_id = None
+            self.port = elements[0]
+            self.host_name = elements[1]
+            self.ip_address = self._get_array_element_or_none(elements, 2)
         else:
-            if Broker._is_port_number(elements[0]):
-                self.unique_id = None
-                self.port = elements[0]
-                self.host_name = elements[1]
-                self.ip_address = self._get_array_element_or_none(elements, 2)
-            else:
-                self.unique_id = elements[0]
-                self.port = elements[1]
-                self.host_name = self._get_array_element_or_none(elements, 2)
-                self.ip_address = self._get_array_element_or_none(elements, 3)
+            self.unique_id = elements[0]
+            self.port = elements[1]
+            self.host_name = self._get_array_element_or_none(elements, 2)
+            self.ip_address = self._get_array_element_or_none(elements, 3)
 
     def _to_broker_string(self):
         """
@@ -227,17 +230,26 @@ class Broker(_BaseObject):
             "{}{}".format(self._FIELD_SEPARATOR, self._ip_address)
             if self.ip_address else "")
 
-    def _connect_to_broker(self):
+    def _connect_to_broker(self, **proxy):
         """
         Attempts to connect to a broker.
         Upon success will set the response time and whether the response
         came from the IP address versus the hostname.
+        :param proxy Proxy arguments dictionary(Can be empty)
         :return: None
         """
         broker_s = None
+        proxy_addr = proxy.get("proxy_addr", None)
+        proxy_port = proxy.get("proxy_port", None)
+        proxy_available = bool(proxy_addr is not None and proxy_port is not None)
         try:
             start = datetime.datetime.now()
-            broker_s = socket.create_connection((self._host_name, self._port), timeout=1.0)
+            if proxy_available:
+                logger.debug("Using proxy for connection: %s:%s", proxy_addr, proxy_port)
+                broker_s = socks.create_connection((self._host_name, self._port), timeout=1.0, **proxy)
+            else:
+                logger.debug("Not using proxy for connection.")
+                broker_s = socket.create_connection((self._host_name, self._port), timeout=1.0)
             end = datetime.datetime.now()
             self._response_from_ip_address = False
             self._response_time = (end - start).total_seconds()
@@ -245,7 +257,12 @@ class Broker(_BaseObject):
             if self._ip_address:
                 try:
                     start = datetime.datetime.now()
-                    broker_s = socket.create_connection((self._ip_address, self._port), timeout=1.0)
+                    if proxy_available:
+                        logger.debug("Using proxy for connection: %s:%s", proxy_addr, proxy_port)
+                        broker_s = socks.create_connection((self._ip_address, self._port), timeout=1.0, **proxy)
+                    else:
+                        logger.debug("Not using proxy for connection.")
+                        broker_s = socket.create_connection((self._ip_address, self._port), timeout=1.0)
                     end = datetime.datetime.now()
                     self._response_from_ip_address = True
                     self._response_time = (end - start).total_seconds()
