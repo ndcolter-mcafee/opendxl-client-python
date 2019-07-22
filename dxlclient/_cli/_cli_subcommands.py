@@ -800,7 +800,7 @@ class UpdateConfigSubcommand(Subcommand):  # pylint: disable=no-init
                                      broker["guid"],
                                      broker["ipAddress"],
                                      broker["port"]) for broker in brokers]
-            websocket_brokers = response_dict.get("webSocketBrokers")
+            websocket_brokers = response_dict.get("brokersWebSockets")
             if websocket_brokers:
                 config.websocket_brokers = [Broker(broker["hostName"],
                                                    broker["guid"],

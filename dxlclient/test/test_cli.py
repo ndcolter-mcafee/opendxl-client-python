@@ -536,7 +536,7 @@ class CliTest(unittest.TestCase):
             # config file should be preserved after the update.
             updated_brokers = make_broker_dict(4)
             del updated_brokers["brokers"][0]
-            updated_brokers["webSocketBrokers"] = updated_brokers["brokers"]
+            updated_brokers["brokersWebSockets"] = updated_brokers["brokers"]
             expected_brokers = make_broker_lines(4)
             del expected_brokers[0]
             expected_broker_lines = "# This is broker 2\n{}".format(
